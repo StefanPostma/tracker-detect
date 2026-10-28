@@ -48,6 +48,8 @@ python3 trackerscan.py --only-new --only-trackers # alleen nieuwe trackers tonen
 python3 trackerscan.py --ignore 1A2B3C4D --ignore 5E6F7A8B   # eigen AirPods/AirTag negeren
 python3 trackerscan.py --log scan.csv             # alle samples als CSV wegschrijven
 python3 trackerscan.py --web                      # plus live webpagina op http://127.0.0.1:8765
+python3 trackerscan.py --web --rit                # ritmodus: wat de hele rit meekomt valt op
+python3 trackerscan.py --min-rssi -75             # zwakke, verre signalen verbergen
 ```
 
 | Optie | Betekenis |
@@ -58,6 +60,9 @@ python3 trackerscan.py --web                      # plus live webpagina op http:
 | `--log F` | CSV met per ontvangen pakket: timestamp, fase, adres, mac, naam, rssi, label, soort, nieuw, leverancier, manufacturer_data, service_uuids, service_data, tx_power. Een bestaand bestand wordt aangevuld. |
 | `--update-vendors` | Download de leverancierslijsten opnieuw naar `vendors.json` en stop. |
 | `--web [POORT]` | Start daarnaast een live webpagina (standaardpoort 8765) en opent die in je browser. |
+| `--rit` | Start in ritmodus (kan ook met de knop **Rit starten** op de webpagina). Apparaten die tijdens de rit onafgebroken meekomen krijgen **rijdt mee** en staan bovenaan. |
+| `--meerijden MIN` | Na zoveel minuten onafgebroken aanwezig tijdens een rit telt een apparaat als "rijdt mee" (standaard 5). |
+| `--min-rssi DBM` | Verberg signalen zwakker dan DBM, bv. `-75` (op de webpagina: het schuifje **Min. signaal**). Alleen weergave: logs en baseline bevatten alles, en wat meerijdt blijft altijd zichtbaar. |
 | `--only-trackers` / `--only-new` | Filter de tabel. |
 | `--stale SEC` | Na hoeveel seconden zonder signaal een apparaat grijs wordt en naar onderen zakt (standaard 30). |
 
@@ -109,6 +114,12 @@ de laatste 10 metingen en ▲/▼ voor warmer of kouder.
   herstelt alles. Verbergen geldt alleen voor deze browsertab en vervalt na een
   herstart van de scanner. Telefoons wisselen ongeveer elk kwartier van adres en
   duiken dan als "nieuw" signaal weer op.
+- **Geluid aan** (in de focusweergave) laat de laptop piepen zoals een
+  geigerteller: sneller en hoger naarmate het gevolgde apparaat sterker
+  binnenkomt. Zo kun je onder stoelen en in wielkasten zoeken zonder naar het
+  scherm te kijken. Zonder recent signaal blijft het stil.
+- **Rit starten** en het schuifje **Min. signaal** doen hetzelfde als `--rit`
+  en `--min-rssi`, zie hieronder.
 - Zolang je de muis over de tabel beweegt, blijft de volgorde staan, zodat je
   niet mis klikt.
 - De pagina is alleen bereikbaar vanaf deze Mac (127.0.0.1). Het ontwerp staat
@@ -133,6 +144,28 @@ de laatste 10 metingen en ▲/▼ voor warmer of kouder.
    buurt is. Zo gedraagt een tracker van iemand anders zich in jouw auto. Een
    SmartTag kent ook "net los van eigenaar": de eigenaar is kort geleden
    weggegaan. Dat is nog normaal.
+
+## Tijdens het rijden
+
+Stilstaand is lastig te zien wat in je auto zit en wat bij de buren staat.
+Tijdens een rit is dat anders: alles buiten de auto is na korte tijd weer uit
+bereik, en wat de hele rit onafgebroken binnenkomt zit vrijwel zeker in of aan
+de auto. Zo werken ook de tracker-meldingen van iPhone en Android.
+
+1. Laat iemand anders rijden en neem de laptop mee, of laat hem gewoon scannen
+   op de passagiersstoel.
+2. Start met `python3 trackerscan.py --web --rit` of klik op **Rit starten**
+   zodra je wegrijdt.
+3. Na `--meerijden` minuten (standaard 5) krijgt alles wat onafgebroken
+   meekwam **rijdt mee**. Die apparaten staan bovenaan, ook als hun signaal zwak
+   is. Je eigen telefoon en die van passagiers horen daar ook bij. Let vooral
+   op trackers met een rood label "rijdt mee", zeker als ze ook "los van
+   eigenaar" zijn.
+4. Een onderbreking van meer dan 60 seconden zonder signaal begint de telling
+   opnieuw. Een auto die een paar minuten naast je staat te wachten valt
+   daardoor meestal weer af.
+5. Telefoons en sommige tags wisselen ongeveer elk kwartier van adres. Hun
+   telling begint dan opnieuw. Daarom staat de standaard op 5 minuten.
 
 ## Beperkingen
 
@@ -167,6 +200,15 @@ soort (`tracker`/`beacon`/`info`) en criteria: `manufacturer_id`,
 `manufacturer_prefix`, `service_uuids`, `service_data_prefix` en `name_pattern`.
 De eerste regel die matcht wint. Via de kolom Advertentiedata of de CSV-log
 vind je de bytes voor een nieuwe regel.
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest
+```
+
+De tests gebruiken nagemaakte advertenties en hebben geen Bluetooth nodig.
 
 ## Licentie
 

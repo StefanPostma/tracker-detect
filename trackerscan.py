@@ -80,6 +80,7 @@ def norm_id(value: str) -> str:
 
 UNKNOWN_LABEL = "onbekend BLE-apparaat"
 RSSI_WINDOW = 10  # aantal samples voor het gemiddelde en de trend
+PRESENCE_GAP = 60  # langer dan zoveel seconden niets ontvangen = onafgebroken aanwezigheid onderbroken
 
 
 @dataclass
@@ -103,8 +104,11 @@ class Device:
     is_new: bool | None = None  # None = geen baseline geladen
     mac: str | None = None  # echt Bluetooth-adres, als macOS het prijsgeeft
     mac_tries: int = 0
+    streak_start: float = 0.0  # begin van de huidige onafgebroken aanwezigheid
 
     def update(self, adv: AdvertisementData, fallback_name: str | None, now: float) -> None:
+        if self.count == 0 or now - self.last_seen > PRESENCE_GAP:
+            self.streak_start = now
         self.count += 1
         self.last_seen = now
         self.name = adv.local_name or fallback_name or self.name
@@ -146,6 +150,12 @@ class Device:
     def rssi_smooth(self) -> float | None:
         """Gemiddelde van de laatste 3 samples: reageert snel maar springt minder dan één sample."""
         return fmean(list(self.samples)[-3:]) if self.samples else None
+
+    def present_seconds(self, since: float, now: float) -> float:
+        """Hoe lang het apparaat vanaf `since` onafgebroken binnenkomt (0 als het weg is)."""
+        if now - self.last_seen > PRESENCE_GAP:
+            return 0.0
+        return max(0.0, self.last_seen - max(self.streak_start, since))
 
     @property
     def trend(self) -> int:
@@ -426,43 +436,46 @@ def vendor_text(dev: Device, with_source: bool = True) -> str:
     return "leverancier: " + "; ".join(hints) if hints else ""
 
 
+def parse_sig_pairs(text: str, key: str) -> dict[str, str]:
+    """De SIG-bestanden zijn simpele lijsten "- key: 0x1234 / name: ..."; geen YAML-library nodig."""
+    pairs = {}
+    for value, name in re.findall(rf"{key}:\s*(0x[0-9A-Fa-f]+)\s*\n\s*name:\s*(.+)", text):
+        name = name.strip()
+        if len(name) >= 2 and name[0] == name[-1] and name[0] in "'\"":
+            name = name[1:-1].replace("''", "'") if name[0] == "'" else name[1:-1]
+        pairs[f"{int(value, 16):04X}"] = name
+    return pairs
+
+
+def parse_oui(text: str) -> dict[str, str]:
+    """Wireshark-manuf: "prefix[/bits] <tab> korte naam [<tab> lange naam]"."""
+    entries = {}
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        prefix, *names = [f.strip() for f in line.split("\t")]
+        names = [n for n in names if n]
+        bits = int(prefix.split("/")[1]) if "/" in prefix else 24
+        hex_prefix = norm_id(prefix.split("/")[0])[: bits // 4]
+        if names and hex_prefix.strip("0"):  # 00:00:00 is geen echte fabrikant
+            entries[hex_prefix] = names[-1]  # lange naam als die er is
+    return entries
+
+
 def update_vendors(console: Console) -> int:
     def fetch(url: str) -> str:
         request = urllib.request.Request(url, headers={"User-Agent": "trackerscan"})
         with urllib.request.urlopen(request, timeout=60) as response:
             return response.read().decode("utf-8", errors="replace")
 
-    def sig_pairs(text: str, key: str) -> dict[str, str]:
-        # De SIG-bestanden zijn simpele lijsten "- key: 0x1234 / name: ..."; geen YAML-library nodig.
-        pairs = {}
-        for value, name in re.findall(rf"{key}:\s*(0x[0-9A-Fa-f]+)\s*\n\s*name:\s*(.+)", text):
-            name = name.strip()
-            if len(name) >= 2 and name[0] == name[-1] and name[0] in "'\"":
-                name = name[1:-1].replace("''", "'") if name[0] == "'" else name[1:-1]
-            pairs[f"{int(value, 16):04X}"] = name
-        return pairs
-
-    def oui_entries(text: str) -> dict[str, str]:
-        entries = {}
-        for line in text.splitlines():
-            if not line or line.startswith("#"):
-                continue
-            prefix, *names = [f.strip() for f in line.split("\t")]
-            names = [n for n in names if n]
-            bits = int(prefix.split("/")[1]) if "/" in prefix else 24
-            hex_prefix = norm_id(prefix.split("/")[0])[: bits // 4]
-            if names and hex_prefix.strip("0"):  # 00:00:00 is geen echte fabrikant
-                entries[hex_prefix] = names[-1]  # lange naam als die er is
-        return entries
-
     console.print("Leverancierslijsten downloaden…")
     try:
         data = {
             "bijgewerkt": datetime.now().astimezone().isoformat(timespec="seconds"),
             "bronnen": VENDOR_SOURCES,
-            "companies": sig_pairs(fetch(VENDOR_SOURCES["companies"]), "value"),
-            "uuids": sig_pairs(fetch(VENDOR_SOURCES["uuids"]), "uuid"),
-            "oui": oui_entries(fetch(VENDOR_SOURCES["oui"])),
+            "companies": parse_sig_pairs(fetch(VENDOR_SOURCES["companies"]), "value"),
+            "uuids": parse_sig_pairs(fetch(VENDOR_SOURCES["uuids"]), "uuid"),
+            "oui": parse_oui(fetch(VENDOR_SOURCES["oui"])),
         }
     except OSError as exc:
         console.print(f"[red]Download mislukt:[/] {escape(str(exc))}")
@@ -562,7 +575,8 @@ def load_baseline(path: Path) -> Baseline:
 
 
 class ScanState:
-    def __init__(self, phase: str, ignore: list[str], baseline: Baseline | None, log: CsvLog | None) -> None:
+    def __init__(self, phase: str, ignore: list[str], baseline: Baseline | None, log: CsvLog | None,
+                 follow_after: float = 300) -> None:
         self.phase = phase  # "baseline" of "scan"
         self.ignore = ignore  # genormaliseerde prefixen
         self.baseline = baseline
@@ -572,6 +586,16 @@ class ScanState:
         self.samples = 0
         self.started = time.time()
         self.resolve_mac: Callable[[AdvertisementData], str | None] | None = None
+        # Rit: buiten de auto komt niets lang onafgebroken mee, dus wat dat tijdens een
+        # rit wél doet, zit vrijwel zeker in of aan de auto.
+        self.drive_start: float | None = None
+        self.follow_after = follow_after  # seconden onafgebroken aanwezig = "rijdt mee"
+
+    def ride_seconds(self, dev: Device, now: float) -> float:
+        return dev.present_seconds(self.drive_start, now) if self.drive_start is not None else 0.0
+
+    def rides_along(self, dev: Device, now: float) -> bool:
+        return self.drive_start is not None and self.ride_seconds(dev, now) >= self.follow_after
 
     def on_advert(self, device: BLEDevice, adv: AdvertisementData) -> None:
         addr = device.address.upper()
@@ -625,11 +649,34 @@ def row_style(dev: Device, stale: bool) -> str:
     return ""
 
 
-def sort_devices(devs: list[Device], now: float, stale_after: float) -> list[Device]:
-    """Sterkste signaal bovenaan (gladgestreken over 3 samples, zodat rijen niet
-    elke seconde van plek wisselen); apparaten zonder recent signaal onderaan."""
-    return sorted(devs, key=lambda d: (now - d.last_seen > stale_after,
+def sort_devices(devs: list[Device], now: float, stale_after: float,
+                 rides: Callable[[Device], bool] = lambda d: False) -> list[Device]:
+    """Meerijdende apparaten eerst, dan sterkste signaal (gladgestreken over 3 samples,
+    zodat rijen niet elke seconde van plek wisselen); zonder recent signaal onderaan."""
+    return sorted(devs, key=lambda d: (now - d.last_seen > stale_after, not rides(d),
                                        -(d.rssi_smooth if d.rssi_smooth is not None else -999)))
+
+
+def below_min_rssi(state: ScanState, dev: Device, min_rssi: float | None, now: float) -> bool:
+    """Valt weg door --min-rssi. Wat meerijdt blijft altijd zichtbaar: een tracker onder
+    de achterbumper heeft juist vaak een zwak signaal."""
+    if min_rssi is None or state.rides_along(dev, now):
+        return False
+    return dev.rssi_smooth is None or dev.rssi_smooth < min_rssi
+
+
+def visible_devices(state: ScanState, args: argparse.Namespace, now: float) -> list[Device]:
+    devs = list(state.devices.values())
+    if args.only_trackers:
+        devs = [d for d in devs if d.kind in FLAGGED_KINDS]
+    if args.only_new and state.baseline is not None:
+        devs = [d for d in devs if d.is_new]
+    devs = [d for d in devs if not below_min_rssi(state, d, args.min_rssi, now)]
+    return sort_devices(devs, now, args.stale, lambda d: state.rides_along(d, now))
+
+
+def fmt_minutes(seconds: float) -> str:
+    return f"{seconds:.0f} s" if seconds < 60 else f"{seconds // 60:.0f} min"
 
 
 def detail_style(dev: Device) -> str:
@@ -642,19 +689,22 @@ def render(state: ScanState, console: Console, args: argparse.Namespace, banner:
     # Smalle terminals: eerst #/Eerst/Advertentiedata weglaten, daarna min/gem/max en Naam.
     wide, medium = width >= 150, width >= 100
 
-    devs = list(state.devices.values())
-    n_total = len(devs)
-    n_flagged = sum(d.kind in FLAGGED_KINDS for d in devs)
-    n_new = sum(bool(d.is_new) for d in devs)
-    if args.only_trackers:
-        devs = [d for d in devs if d.kind in FLAGGED_KINDS]
-    if args.only_new and state.baseline is not None:
-        devs = [d for d in devs if d.is_new]
-    devs = sort_devices(devs, now, args.stale)
+    all_devs = list(state.devices.values())
+    devs = visible_devices(state, args, now)
+    n_flagged = sum(d.kind in FLAGGED_KINDS for d in all_devs)
+    n_new = sum(bool(d.is_new) for d in all_devs)
+    driving = state.drive_start is not None
 
-    stats = [f"{n_total} apparaten", f"{n_flagged} trackers/beacons"]
+    stats = [f"{len(all_devs)} apparaten", f"{n_flagged} trackers/beacons"]
     if state.baseline is not None:
         stats.append(f"{n_new} nieuw t.o.v. baseline ({state.baseline.created})")
+    if driving:
+        n_riding = sum(state.rides_along(d, now) for d in all_devs)
+        stats.append(f"rit sinds {fmt_time(state.drive_start)}: {n_riding} rijden mee "
+                     f"(≥ {fmt_minutes(state.follow_after)} onafgebroken)")
+    if args.min_rssi is not None:
+        n_weak = sum(below_min_rssi(state, d, args.min_rssi, now) for d in all_devs)
+        stats.append(f"{n_weak} zwakker dan {args.min_rssi} dBm verborgen")
     if state.ignored:
         stats.append(f"{len(state.ignored)} genegeerd")
     stats.append(f"{state.samples} samples")
@@ -687,6 +737,8 @@ def render(state: ScanState, console: Console, args: argparse.Namespace, banner:
         table.add_column("#", justify="right", no_wrap=True)
         table.add_column("Eerst", no_wrap=True)
     table.add_column("Laatst", justify="right", no_wrap=True)
+    if driving:
+        table.add_column("Rit", justify="right", no_wrap=True)
     if wide:
         table.add_column("Advertentiedata", ratio=2, no_wrap=True, overflow="ellipsis")
 
@@ -719,6 +771,10 @@ def render(state: ScanState, console: Console, args: argparse.Namespace, banner:
         if wide:
             cells += [Text(str(dev.count)), Text(fmt_time(dev.first_seen))]
         cells.append(Text(f"{now - dev.last_seen:.0f}s"))
+        if driving:
+            ride = state.ride_seconds(dev, now)
+            cells.append(Text("MEE " + fmt_minutes(ride), style="bold white on red") if state.rides_along(dev, now)
+                         else Text(fmt_minutes(ride) if ride else "", style="grey50"))
         if wide:
             cells.append(Text(compact_data(dev), style="grey50"))
         table.add_row(*cells, style=row_style(dev, stale))
@@ -796,7 +852,7 @@ def web_url(args: argparse.Namespace) -> str:
     return f"http://127.0.0.1:{args.web}/"
 
 
-def device_json(dev: Device, now: float, stale_after: float) -> dict:
+def device_json(dev: Device, now: float, state: ScanState, args: argparse.Namespace) -> dict:
     return {
         "address": dev.address,
         "id": dev.address[:8],
@@ -816,7 +872,9 @@ def device_json(dev: Device, now: float, stale_after: float) -> dict:
         "count": dev.count,
         "first_seen": dev.first_seen,
         "age": now - dev.last_seen,
-        "stale": now - dev.last_seen > stale_after,
+        "stale": now - dev.last_seen > args.stale,
+        "ride_s": state.ride_seconds(dev, now),
+        "rides": state.rides_along(dev, now),
         "data": compact_data(dev),
         "mac": dev.mac,
         "vendor": vendor_text(dev),
@@ -825,7 +883,7 @@ def device_json(dev: Device, now: float, stale_after: float) -> dict:
 
 def state_json(state: ScanState, args: argparse.Namespace) -> bytes:
     now = time.time()
-    devs = sort_devices(list(state.devices.values()), now, args.stale)
+    devs = sort_devices(list(state.devices.values()), now, args.stale, lambda d: state.rides_along(d, now))
     baseline = state.baseline
     return json.dumps({
         "phase": state.phase,
@@ -833,58 +891,76 @@ def state_json(state: ScanState, args: argparse.Namespace) -> bytes:
         "samples": state.samples,
         "ignored": len(state.ignored),
         "baseline": {"created": baseline.created, "count": len(baseline.addresses)} if baseline else None,
-        "defaults": {"only_trackers": args.only_trackers, "only_new": args.only_new},
-        "devices": [device_json(d, now, args.stale) for d in devs],
+        "drive": {"start": state.drive_start, "follow_after": state.follow_after} if state.drive_start else None,
+        "defaults": {"only_trackers": args.only_trackers, "only_new": args.only_new, "min_rssi": args.min_rssi},
+        "devices": [device_json(d, now, state, args) for d in devs],
     }).encode()
 
 
-async def start_web(state: ScanState, args: argparse.Namespace) -> asyncio.Server:
+def post_baseline(state: ScanState, args: argparse.Namespace) -> dict:
+    baseline = capture_baseline(state, args.baseline_file)
+    return {"count": len(baseline.addresses), "created": baseline.created, "file": args.baseline_file.name}
+
+
+def post_drive_start(state: ScanState, args: argparse.Namespace) -> dict:
+    state.drive_start = time.time()
+    return {"start": state.drive_start}
+
+
+def post_drive_stop(state: ScanState, args: argparse.Namespace) -> dict:
+    state.drive_start = None
+    return {"start": None}
+
+
+POST_ACTIONS = {"/api/baseline": post_baseline, "/api/drive/start": post_drive_start, "/api/drive/stop": post_drive_stop}
+
+
+def handle_request(head: bytes, state: ScanState, args: argparse.Namespace) -> tuple[str, str, bytes]:
+    """Beantwoordt één HTTP-verzoek: (status, content-type, body)."""
+    text_type = "text/plain; charset=utf-8"
     # Alleen deze Host-headers: voorkomt dat een website via DNS-rebinding meeleest.
     allowed_hosts = {f"127.0.0.1:{args.web}", f"localhost:{args.web}"}
-    allowed_origins = {f"http://{host}" for host in allowed_hosts}
-
-    def route(head: bytes) -> tuple[str, str, bytes]:
-        text_type = "text/plain; charset=utf-8"
-        try:
-            request_line, *header_lines = head.decode("latin-1").split("\r\n")
-            method, target, _ = request_line.split(" ", 2)
-        except ValueError:
-            return "400 Bad Request", text_type, b"bad request"
-        headers = {k.strip().lower(): v.strip() for k, _, v in (h.partition(":") for h in header_lines if h)}
-        if headers.get("host") not in allowed_hosts:
+    try:
+        request_line, *header_lines = head.decode("latin-1").split("\r\n")
+        method, target, _ = request_line.split(" ", 2)
+    except ValueError:
+        return "400 Bad Request", text_type, b"bad request"
+    headers = {k.strip().lower(): v.strip() for k, _, v in (h.partition(":") for h in header_lines if h)}
+    if headers.get("host") not in allowed_hosts:
+        return "403 Forbidden", text_type, b"forbidden"
+    if method == "POST" and target in POST_ACTIONS:
+        # Een andere website mag niets veranderen (zoals een baseline zetten, waarna een
+        # tracker "niet nieuw" lijkt): de eigen header dwingt een CORS-preflight af die
+        # deze server weigert, en Origin moet de eigen pagina zijn.
+        if headers.get("x-trackerscan") != "1" or headers.get("origin", "") not in {f"http://{h}" for h in allowed_hosts}:
             return "403 Forbidden", text_type, b"forbidden"
-        if method == "POST" and target == "/api/baseline":
-            # Een andere website mag geen baseline zetten (dan lijkt een tracker "niet nieuw"):
-            # de eigen header dwingt een CORS-preflight af die deze server weigert, en
-            # Origin moet de eigen pagina zijn.
-            if headers.get("x-trackerscan") != "1" or headers.get("origin", "") not in allowed_origins:
-                return "403 Forbidden", text_type, b"forbidden"
-            if state.phase != "scan":
-                return "409 Conflict", text_type, "de baseline-scan loopt nog".encode()
-            try:
-                baseline = capture_baseline(state, args.baseline_file)
-            except OSError as exc:
-                return "500 Internal Server Error", text_type, f"opslaan mislukt: {exc.strerror or exc}".encode()
-            return "200 OK", "application/json", json.dumps(
-                {"count": len(baseline.addresses), "created": baseline.created, "file": args.baseline_file.name}).encode()
-        if method != "GET":
-            return "405 Method Not Allowed", text_type, b"method not allowed"
-        if target == "/":
-            try:
-                return "200 OK", "text/html; charset=utf-8", WEB_PAGE.read_bytes()
-            except OSError:
-                return "500 Internal Server Error", text_type, f"{WEB_PAGE.name} ontbreekt".encode()
-        if target == "/api/state":
-            return "200 OK", "application/json", state_json(state, args)
-        return "404 Not Found", text_type, b"not found"
+        if state.phase != "scan":
+            return "409 Conflict", text_type, "de baseline-scan loopt nog".encode()
+        try:
+            result = POST_ACTIONS[target](state, args)
+        except OSError as exc:
+            return "500 Internal Server Error", text_type, f"opslaan mislukt: {exc.strerror or exc}".encode()
+        return "200 OK", "application/json", json.dumps(result).encode()
+    if method != "GET":
+        return "405 Method Not Allowed", text_type, b"method not allowed"
+    if target == "/":
+        try:
+            return "200 OK", "text/html; charset=utf-8", WEB_PAGE.read_bytes()
+        except OSError:
+            return "500 Internal Server Error", text_type, f"{WEB_PAGE.name} ontbreekt".encode()
+    if target == "/api/state":
+        return "200 OK", "application/json", state_json(state, args)
+    return "404 Not Found", text_type, b"not found"
 
+
+async def start_web(state: ScanState, args: argparse.Namespace) -> asyncio.Server:
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5)
         except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, asyncio.TimeoutError, OSError):
             writer.close()
             return
-        status, content_type, body = route(head)
+        status, content_type, body = handle_request(head, state, args)
         writer.write(
             f"HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {len(body)}\r\n"
             f"Cache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n"
@@ -915,6 +991,17 @@ def print_summary(console: Console, state: ScanState) -> None:
     console.print(f"\n[bold]Samenvatting:[/] {len(devs)} apparaten, {state.samples} samples in {minutes:.1f} min.")
     if state.baseline is not None:
         console.print(f"{sum(bool(d.is_new) for d in devs)} apparaten zaten niet in de baseline.")
+    now = time.time()
+    riders = [d for d in devs if state.rides_along(d, now)]
+    if riders:
+        table = Table(title=f"Reden mee tijdens de rit (≥ {fmt_minutes(state.follow_after)} onafgebroken)",
+                      title_justify="left", box=box.SIMPLE_HEAD)
+        for col in ("Adres/UUID", "Type", "Naam", "Mee", "Max", "Gem"):
+            table.add_column(col, justify="right" if col in ("Mee", "Max", "Gem") else "left")
+        for d in riders:
+            table.add_row(Text(d.address), Text(d.label), Text(d.name or ""), fmt_minutes(state.ride_seconds(d, now)),
+                          fmt_rssi(d.rssi_max), fmt_rssi(d.rssi_avg), style=row_style(d, stale=False))
+        console.print(table)
     if not hits:
         console.print("[green]Geen trackers of beacons herkend.[/]")
         return
@@ -959,6 +1046,13 @@ def positive_seconds(value: str) -> float:
     return seconds
 
 
+def rssi_threshold(value: str) -> int:
+    number = int(value)
+    if not -127 < number < 0:
+        raise argparse.ArgumentTypeError("geef een negatieve waarde in dBm, bv. -75")
+    return number
+
+
 def port(value: str) -> int:
     number = int(value)
     if not 1 <= number <= 65535:
@@ -981,6 +1075,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
                    help="schrijf alle samples als CSV (een bestaand bestand wordt aangevuld)")
     p.add_argument("--web", type=port, nargs="?", const=8765, metavar="POORT",
                    help="toon ook een live webpagina op http://127.0.0.1:POORT (standaard 8765) en open die")
+    p.add_argument("--min-rssi", type=rssi_threshold, metavar="DBM",
+                   help="verberg zwakkere signalen, bv. -75 (alleen weergave; wat meerijdt blijft zichtbaar)")
+    p.add_argument("--rit", action="store_true",
+                   help="start in ritmodus: markeer apparaten die de hele rit onafgebroken meekomen")
+    p.add_argument("--meerijden", type=positive_seconds, default=5, metavar="MINUTEN",
+                   help="zoveel minuten onafgebroken aanwezig tijdens een rit = 'rijdt mee' (standaard 5)")
     p.add_argument("--only-trackers", action="store_true", help="toon alleen trackers en beacons")
     p.add_argument("--only-new", action="store_true", help="toon alleen apparaten die niet in de baseline zitten")
     p.add_argument("--stale", type=positive_seconds, default=30, metavar="SECONDEN",
@@ -1019,7 +1119,9 @@ def main(argv: list[str] | None = None) -> int:
         elif args.only_new:
             console.print(f"[yellow]--only-new genegeerd: {args.baseline_file} bestaat niet (maak er een met --baseline).[/]")
 
-        state = ScanState("scan", args.ignore, baseline, log)
+        state = ScanState("scan", args.ignore, baseline, log, follow_after=args.meerijden * 60)
+        if args.rit:
+            state.drive_start = state.started
         asyncio.run(scan(state, console, args))
     except KeyboardInterrupt:
         if state is None:

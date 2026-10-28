@@ -9,3 +9,4 @@ vendors.json
 # Scanresultaten: bevatten apparaten uit je eigen omgeving
 baseline.json
 *.csv
+.pytest_cache/

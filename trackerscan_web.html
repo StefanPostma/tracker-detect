@@ -74,6 +74,8 @@
   .controls label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
   .controls label:has(input:disabled) { opacity: 0.5; cursor: default; }
   .hint { color: var(--muted); }
+  .controls input[type="range"] { width: 130px; accent-color: var(--accent); }
+  .controls output { min-width: 4.5em; font-variant-numeric: tabular-nums; }
 
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
 
@@ -93,8 +95,9 @@
   button:hover:not(:disabled) { background: var(--hover); }
   button:disabled { opacity: 0.5; cursor: default; }
   #focus { position: relative; }
-  .unfocus { position: absolute; top: 16px; right: 20px; }
-  .focus-head { padding-right: 110px; }
+  .focus-actions { position: absolute; top: 16px; right: 20px; display: flex; gap: 8px; }
+  .focus-head { padding-right: 240px; }
+  button[aria-pressed="true"] { background: var(--selected); border-color: var(--accent); }
 
   .table-wrap { overflow-x: auto; }
   table { width: 100%; border-collapse: collapse; }
@@ -142,6 +145,8 @@
   }
   .badge.new { background: var(--critical); color: #ffffff; }
   .badge.sep { border: 1px solid var(--critical); color: var(--ink); }
+  .badge.ride { background: var(--critical); color: #ffffff; }
+  .badge.ride-other { border: 1px solid var(--ink-2); color: var(--ink); }
   .detail { color: var(--ink-2); font-size: 13px; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; color: var(--ink-2); }
   .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
@@ -150,6 +155,8 @@
   @media (max-width: 720px) {
     .col-name, .col-id { display: none; }
     .hero { font-size: 48px; }
+    .focus-actions { position: static; margin-bottom: 10px; }
+    .focus-head { padding-right: 0; }
   }
 </style>
 </head>
@@ -163,9 +170,15 @@
   <div class="controls">
     <label><input type="checkbox" id="f-trackers"> Alleen trackers en beacons</label>
     <label id="f-new-label"><input type="checkbox" id="f-new" disabled> Alleen nieuw (t.o.v. baseline)<span id="f-new-hint"></span></label>
+    <label title="Verbergt zwakke, verre signalen. Wat tijdens een rit meerijdt blijft altijd zichtbaar.">Min. signaal
+      <input type="range" id="f-min" min="-100" max="-40" step="5" value="-100"> <output id="f-min-value">uit</output></label>
+  </div>
+  <div class="controls">
     <button type="button" id="capture-baseline"
             title="Legt alle apparaten die de scanner tot nu toe zag vast als baseline. Doe dit ver van de auto.">Baseline vastleggen</button>
-    <span id="baseline-msg" class="hint" role="status"></span>
+    <button type="button" id="drive" aria-pressed="false"
+            title="Markeert apparaten die tijdens de rit onafgebroken meekomen: die zitten vrijwel zeker in of aan de auto.">Rit starten</button>
+    <span id="action-msg" class="hint" role="status"></span>
   </div>
   <div class="controls">
     <button type="button" id="hide-all">Verberg alles wat nu zichtbaar is</button>
@@ -175,7 +188,11 @@
   </div>
 
   <section id="focus" class="card" hidden>
-    <button type="button" id="unfocus" class="unfocus">Loslaten</button>
+    <div class="focus-actions">
+      <button type="button" id="sound" aria-pressed="false"
+              title="Piept sneller en hoger naarmate het signaal sterker wordt, zodat je kunt zoeken zonder naar het scherm te kijken.">Geluid aan</button>
+      <button type="button" id="unfocus">Loslaten</button>
+    </div>
     <div id="focus-content" aria-live="polite"></div>
   </section>
 
@@ -212,7 +229,8 @@
   const rowsEl = $("rows"), statusEl = $("status"), focusEl = $("focus"), emptyEl = $("empty");
   const fTrackers = $("f-trackers"), fNew = $("f-new"), fShowHidden = $("f-show-hidden");
   const fNewLabel = $("f-new-label"), fNewHint = $("f-new-hint");
-  const baselineButton = $("capture-baseline"), baselineMsg = $("baseline-msg");
+  const baselineButton = $("capture-baseline"), driveButton = $("drive"), actionMsg = $("action-msg");
+  const fMin = $("f-min"), fMinValue = $("f-min-value"), soundButton = $("sound");
   const hideAllButton = $("hide-all"), unhideAllButton = $("unhide-all"), hiddenCountEl = $("hidden-count");
   const focusContent = $("focus-content");
   const rowByAddress = new Map();
@@ -257,9 +275,15 @@
   const ago = (sec) => (sec < 60 ? `${Math.round(sec)} s` : `${Math.floor(sec / 60)} min`);
   const isFlagged = (d) => d.kind === "tracker" || d.kind === "beacon";
   const cleanDetail = (d) => (d.detail || "").replace(SEPARATED, "").replace(/^[,\s]+/, "");
+  const fmtMinutes = (sec) => (sec < 60 ? `${Math.round(sec)} s` : `${Math.floor(sec / 60)} min`);
+  const fmtClock = (ts) => new Date(ts * 1000).toLocaleTimeString("nl-NL", { hour: "2-digit", minute: "2-digit" });
+  const strength = (rssi) => Math.min(1, Math.max(0, (rssi - RSSI_FLOOR) / (RSSI_CEIL - RSSI_FLOOR)));
+  const minRssi = () => (Number(fMin.value) <= -100 ? null : Number(fMin.value));
+  // Wat meerijdt blijft altijd zichtbaar: een tracker onder de bumper heeft juist vaak een zwak signaal.
+  const belowMin = (d, min) => min != null && !d.rides && (d.rssi_smooth ?? -999) < min;
 
   function meter(rssi, big) {
-    const frac = rssi == null ? 0 : Math.min(1, Math.max(0, (rssi - RSSI_FLOOR) / (RSSI_CEIL - RSSI_FLOOR)));
+    const frac = rssi == null ? 0 : strength(rssi);
     const fill = el("div", { class: "fill" });
     fill.style.width = `${(frac * 100).toFixed(1)}%`;
     return el("div", {
@@ -298,6 +322,8 @@
     return [
       d.is_new ? el("span", { class: "badge new" }, "● NIEUW") : null,
       d.separated ? el("span", { class: "badge sep" }, "⚠ los van eigenaar") : null,
+      d.rides ? el("span", { class: d.kind === "tracker" ? "badge ride" : "badge ride-other" },
+        `● rijdt mee · ${fmtMinutes(d.ride_s)}`) : null,
     ];
   }
 
@@ -354,8 +380,10 @@
           el("div", { class: "focus-trend" }, trend(d.trend, true))),
         el("div", { class: "focus-viz" }, meter(d.rssi, true), sparkline(d.samples, 480, 64))),
       el("div", { class: "detail" },
-        `laatst gezien ${ago(d.age)} geleden · ${d.count}× ontvangen · ` +
-        `min/gem/max ${fmtRssi(d.rssi_min)} / ${fmtRssi(d.rssi_avg)} / ${fmtRssi(d.rssi_max)} dBm`),
+        [`laatst gezien ${ago(d.age)} geleden`, `${d.count}× ontvangen`,
+         `min/gem/max ${fmtRssi(d.rssi_min)} / ${fmtRssi(d.rssi_avg)} / ${fmtRssi(d.rssi_max)} dBm`,
+         lastState?.drive && d.ride_s ? `tijdens de rit ${fmtMinutes(d.ride_s)} onafgebroken aanwezig` : null,
+        ].filter(Boolean).join(" · ")),
     );
   }
 
@@ -366,6 +394,13 @@
       const when = isNaN(created) ? s.baseline.created : created.toLocaleString("nl-NL", { dateStyle: "short", timeStyle: "short" });
       parts.push(`${s.devices.filter((d) => d.is_new).length} nieuw t.o.v. baseline van ${when}`);
     }
+    if (s.drive) {
+      parts.push(`rit sinds ${fmtClock(s.drive.start)}: ${s.devices.filter((d) => d.rides).length} rijden mee` +
+        ` (≥ ${fmtMinutes(s.drive.follow_after)} onafgebroken)`);
+    }
+    const min = minRssi();
+    const weak = s.devices.filter((d) => belowMin(d, min)).length;
+    if (weak) parts.push(`${weak} zwakker dan ${min} dBm verborgen`);
     if (s.ignored) parts.push(`${s.ignored} genegeerd`);
     const hiddenNow = s.devices.filter((d) => hidden.has(d.address)).length;
     if (hiddenNow) parts.push(`${hiddenNow} verborgen`);
@@ -382,6 +417,10 @@
     if (!defaultsApplied) {
       fTrackers.checked = s.defaults.only_trackers || load("f-trackers") === "1";
       fNew.checked = s.defaults.only_new || load("f-new") === "1";
+      const storedMin = load("f-min");
+      if (s.defaults.min_rssi != null) fMin.value = String(s.defaults.min_rssi);
+      else if (storedMin != null) fMin.value = storedMin;
+      updateMinLabel();
       defaultsApplied = true;
     }
     fNew.disabled = !s.baseline;
@@ -392,6 +431,9 @@
       baselineButton.textContent = s.baseline ? "Baseline opnieuw vastleggen" : "Baseline vastleggen";
     }
     baselineButton.disabled = s.phase !== "scan";
+    driveButton.disabled = s.phase !== "scan";
+    driveButton.setAttribute("aria-pressed", String(Boolean(s.drive)));
+    driveButton.textContent = s.drive ? `Rit stoppen (sinds ${fmtClock(s.drive.start)})` : "Rit starten";
 
     const filtered = filteredDevices(s);
     // Een net verborgen rij blijft (vervaagd) staan zolang je de muis over de tabel
@@ -400,7 +442,7 @@
       (d) => !hidden.has(d.address) || (holdOrder && rowByAddress.get(d.address)?.isConnected));
     const hiddenNow = s.devices.filter((d) => hidden.has(d.address)).length;
     hiddenCountEl.textContent = String(hiddenNow);
-    unhideAllButton.disabled = hidden.size === 0;
+    unhideAllButton.disabled = hiddenNow === 0;  // oude, intussen gewisselde adressen tellen niet mee
 
     const shown = new Set();
     for (const d of list) {
@@ -429,7 +471,13 @@
     let list = s.devices;  // al gesorteerd door de scanner
     if (fTrackers.checked) list = list.filter(isFlagged);
     if (fNew.checked && s.baseline) list = list.filter((d) => d.is_new);
+    const min = minRssi();
+    if (min != null) list = list.filter((d) => !belowMin(d, min));
     return list;
+  }
+
+  function updateMinLabel() {
+    fMinValue.textContent = minRssi() == null ? "uit" : `${fMin.value} dBm`;
   }
 
   function renderOffline() {
@@ -455,6 +503,7 @@
 
   function toggleFocus(address) {
     focused = focused === address ? null : address;
+    if (!focused) setSound(false);
     if (lastState) render(lastState);
     if (focused) focusEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
@@ -504,10 +553,17 @@
     delete baselineButton.dataset.confirm;
     baselineButton.textContent = lastState?.baseline ? "Baseline opnieuw vastleggen" : "Baseline vastleggen";
   }
-  function showBaselineMessage(text) {
+  function showMessage(text) {
     clearTimeout(messageTimer);
-    baselineMsg.textContent = text;
-    messageTimer = setTimeout(() => { baselineMsg.textContent = ""; }, 8000);
+    actionMsg.textContent = text;
+    messageTimer = setTimeout(() => { actionMsg.textContent = ""; }, 8000);
+  }
+  // Acties die de scanner veranderen; de eigen header laat de server zien dat het
+  // verzoek van deze pagina komt (zie handle_request in trackerscan.py).
+  async function postAction(path) {
+    const res = await fetch(path, { method: "POST", headers: { "X-Trackerscan": "1" }, signal: AbortSignal.timeout(5000) });
+    if (!res.ok) throw new Error(await res.text());
+    return res.json();
   }
   baselineButton.addEventListener("click", async () => {
     if (lastState?.baseline && !baselineButton.dataset.confirm) {
@@ -519,18 +575,74 @@
     resetBaselineButton();
     baselineButton.disabled = true;
     try {
-      const res = await fetch("/api/baseline", {
-        method: "POST", headers: { "X-Trackerscan": "1" }, signal: AbortSignal.timeout(5000),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const info = await res.json();
-      showBaselineMessage(`Baseline vastgelegd: ${info.count} apparaten (${info.file}). Nieuwe apparaten krijgen nu ● NIEUW.`);
+      const info = await postAction("/api/baseline");
+      showMessage(`Baseline vastgelegd: ${info.count} apparaten (${info.file}). Nieuwe apparaten krijgen nu ● NIEUW.`);
     } catch (err) {
-      showBaselineMessage(`Vastleggen mislukt: ${err.message}`);
+      showMessage(`Vastleggen mislukt: ${err.message}`);
     } finally {
       baselineButton.disabled = false;
     }
   });
+  driveButton.addEventListener("click", async () => {
+    const driving = Boolean(lastState?.drive);
+    driveButton.disabled = true;
+    try {
+      await postAction(driving ? "/api/drive/stop" : "/api/drive/start");
+      showMessage(driving ? "Rit gestopt."
+        : "Rit gestart. Wat onafgebroken meekomt krijgt ● rijdt mee; houd de laptop tijdens het rijden aan.");
+    } catch (err) {
+      showMessage(`Mislukt: ${err.message}`);
+    } finally {
+      driveButton.disabled = false;
+    }
+  });
+  fMin.addEventListener("input", () => {
+    store("f-min", fMin.value);
+    updateMinLabel();
+    if (lastState) render(lastState);
+  });
+
+  // Geigerteller: de laptop piept sneller en hoger naarmate het gevolgde apparaat sterker
+  // binnenkomt, zodat je onder stoelen en in wielkasten kunt zoeken zonder naar het scherm
+  // te kijken. Zonder recent signaal blijft het stil.
+  let audio = null, soundOn = false, beepTimer = null;
+  function beep(frequency) {
+    const t = audio.currentTime;
+    const osc = audio.createOscillator(), gain = audio.createGain();
+    osc.frequency.value = frequency;
+    gain.gain.setValueAtTime(0.0001, t);
+    gain.gain.exponentialRampToValueAtTime(0.2, t + 0.005);
+    gain.gain.exponentialRampToValueAtTime(0.0001, t + 0.06);
+    osc.connect(gain).connect(audio.destination);
+    osc.start(t);
+    osc.stop(t + 0.07);
+  }
+  function tick() {
+    beepTimer = null;
+    if (!soundOn) return;
+    const d = lastState?.devices.find((x) => x.address === focused);
+    if (!d || d.rssi_smooth == null || d.age > 5) {
+      beepTimer = setTimeout(tick, 500);
+      return;
+    }
+    const f = strength(d.rssi_smooth);
+    beep(500 + 900 * f);  // 500 Hz ver weg, 1400 Hz er bovenop
+    beepTimer = setTimeout(tick, 1500 * Math.pow(80 / 1500, f));  // 1,5 s ver weg, 80 ms er bovenop
+  }
+  function setSound(on) {
+    soundOn = on;
+    soundButton.setAttribute("aria-pressed", String(on));
+    soundButton.textContent = on ? "Geluid uit" : "Geluid aan";
+    if (on) {
+      audio ??= new AudioContext();  // mag pas na een klik van de gebruiker
+      audio.resume();
+      if (!beepTimer) tick();
+    } else {
+      clearTimeout(beepTimer);
+      beepTimer = null;
+    }
+  }
+  soundButton.addEventListener("click", () => setSound(!soundOn));
   for (const [box, key] of [[fTrackers, "f-trackers"], [fNew, "f-new"]]) {
     box.addEventListener("change", () => { store(key, box.checked ? "1" : "0"); if (lastState) render(lastState); });
   }
