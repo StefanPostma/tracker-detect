@@ -98,6 +98,10 @@ de laatste 10 metingen en ▲/▼ voor warmer of kouder.
   laptop door de auto loopt.
 - Met de vinkjes filter je op trackers/beacons of op apparaten die nieuw zijn
   t.o.v. de baseline.
+- **Baseline vastleggen** legt alles vast wat de scanner tot nu toe zag, zonder
+  herstart. Doe dat ver van de auto. Het wordt opgeslagen in `baseline.json`
+  (of `--baseline-file`); daarna krijgen nieuwe apparaten ● NIEUW en werkt
+  "Alleen nieuw". Een bestaande baseline vervangen vraagt een tweede klik.
 - **Signalen tijdelijk verbergen:** vink een apparaat aan in de kolom *Verb.*,
   of klik op **Verberg alles wat nu zichtbaar is**. Doe dat voordat de auto in
   de buurt komt. Daarna verschijnen alleen nieuwe signalen, zoals dat van de

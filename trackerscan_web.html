@@ -162,7 +162,10 @@
 
   <div class="controls">
     <label><input type="checkbox" id="f-trackers"> Alleen trackers en beacons</label>
-    <label><input type="checkbox" id="f-new" disabled> Alleen nieuw (t.o.v. baseline)</label>
+    <label id="f-new-label"><input type="checkbox" id="f-new" disabled> Alleen nieuw (t.o.v. baseline)<span id="f-new-hint"></span></label>
+    <button type="button" id="capture-baseline"
+            title="Legt alle apparaten die de scanner tot nu toe zag vast als baseline. Doe dit ver van de auto.">Baseline vastleggen</button>
+    <span id="baseline-msg" class="hint" role="status"></span>
   </div>
   <div class="controls">
     <button type="button" id="hide-all">Verberg alles wat nu zichtbaar is</button>
@@ -208,6 +211,8 @@
   const $ = (id) => document.getElementById(id);
   const rowsEl = $("rows"), statusEl = $("status"), focusEl = $("focus"), emptyEl = $("empty");
   const fTrackers = $("f-trackers"), fNew = $("f-new"), fShowHidden = $("f-show-hidden");
+  const fNewLabel = $("f-new-label"), fNewHint = $("f-new-hint");
+  const baselineButton = $("capture-baseline"), baselineMsg = $("baseline-msg");
   const hideAllButton = $("hide-all"), unhideAllButton = $("unhide-all"), hiddenCountEl = $("hidden-count");
   const focusContent = $("focus-content");
   const rowByAddress = new Map();
@@ -380,6 +385,13 @@
       defaultsApplied = true;
     }
     fNew.disabled = !s.baseline;
+    fNewHint.textContent = s.baseline ? "" : " — geen baseline geladen";
+    fNewLabel.title = s.baseline ? ""
+      : "Klik op 'Baseline vastleggen' of start de scanner met --baseline 120 (ver van de auto).";
+    if (!baselineButton.dataset.confirm) {
+      baselineButton.textContent = s.baseline ? "Baseline opnieuw vastleggen" : "Baseline vastleggen";
+    }
+    baselineButton.disabled = s.phase !== "scan";
 
     const filtered = filteredDevices(s);
     // Een net verborgen rij blijft (vervaagd) staan zolang je de muis over de tabel
@@ -483,6 +495,42 @@
     setHidden([...hidden], false);
   });
   fShowHidden.addEventListener("change", () => { if (lastState) render(lastState); });
+
+  // Baseline vastleggen. Een bestaande baseline overschrijven vraagt een tweede klik
+  // (geen confirm()-venster: dat blokkeert de pagina).
+  let confirmTimer = null, messageTimer = null;
+  function resetBaselineButton() {
+    clearTimeout(confirmTimer);
+    delete baselineButton.dataset.confirm;
+    baselineButton.textContent = lastState?.baseline ? "Baseline opnieuw vastleggen" : "Baseline vastleggen";
+  }
+  function showBaselineMessage(text) {
+    clearTimeout(messageTimer);
+    baselineMsg.textContent = text;
+    messageTimer = setTimeout(() => { baselineMsg.textContent = ""; }, 8000);
+  }
+  baselineButton.addEventListener("click", async () => {
+    if (lastState?.baseline && !baselineButton.dataset.confirm) {
+      baselineButton.dataset.confirm = "1";
+      baselineButton.textContent = "Bestaande baseline vervangen? Klik nogmaals";
+      confirmTimer = setTimeout(resetBaselineButton, 4000);
+      return;
+    }
+    resetBaselineButton();
+    baselineButton.disabled = true;
+    try {
+      const res = await fetch("/api/baseline", {
+        method: "POST", headers: { "X-Trackerscan": "1" }, signal: AbortSignal.timeout(5000),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const info = await res.json();
+      showBaselineMessage(`Baseline vastgelegd: ${info.count} apparaten (${info.file}). Nieuwe apparaten krijgen nu ● NIEUW.`);
+    } catch (err) {
+      showBaselineMessage(`Vastleggen mislukt: ${err.message}`);
+    } finally {
+      baselineButton.disabled = false;
+    }
+  });
   for (const [box, key] of [[fTrackers, "f-trackers"], [fNew, "f-new"]]) {
     box.addEventListener("change", () => { store(key, box.checked ? "1" : "0"); if (lastState) render(lastState); });
   }

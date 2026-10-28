@@ -542,6 +542,15 @@ def save_baseline(path: Path, devices: dict[str, Device], duration: float) -> No
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def capture_baseline(state: ScanState, path: Path) -> Baseline:
+    """Alles wat deze scan tot nu toe zag wordt de baseline (knop op de webpagina)."""
+    save_baseline(path, state.devices, time.time() - state.started)
+    state.baseline = load_baseline(path)
+    for addr, dev in state.devices.items():
+        dev.is_new = addr not in state.baseline.addresses
+    return state.baseline
+
+
 def load_baseline(path: Path) -> Baseline:
     data = json.loads(path.read_text(encoding="utf-8"))
     return Baseline({a.upper() for a in data.get("apparaten", {})}, data.get("aangemaakt", "?"))
@@ -832,6 +841,7 @@ def state_json(state: ScanState, args: argparse.Namespace) -> bytes:
 async def start_web(state: ScanState, args: argparse.Namespace) -> asyncio.Server:
     # Alleen deze Host-headers: voorkomt dat een website via DNS-rebinding meeleest.
     allowed_hosts = {f"127.0.0.1:{args.web}", f"localhost:{args.web}"}
+    allowed_origins = {f"http://{host}" for host in allowed_hosts}
 
     def route(head: bytes) -> tuple[str, str, bytes]:
         text_type = "text/plain; charset=utf-8"
@@ -843,6 +853,20 @@ async def start_web(state: ScanState, args: argparse.Namespace) -> asyncio.Serve
         headers = {k.strip().lower(): v.strip() for k, _, v in (h.partition(":") for h in header_lines if h)}
         if headers.get("host") not in allowed_hosts:
             return "403 Forbidden", text_type, b"forbidden"
+        if method == "POST" and target == "/api/baseline":
+            # Een andere website mag geen baseline zetten (dan lijkt een tracker "niet nieuw"):
+            # de eigen header dwingt een CORS-preflight af die deze server weigert, en
+            # Origin moet de eigen pagina zijn.
+            if headers.get("x-trackerscan") != "1" or headers.get("origin", "") not in allowed_origins:
+                return "403 Forbidden", text_type, b"forbidden"
+            if state.phase != "scan":
+                return "409 Conflict", text_type, "de baseline-scan loopt nog".encode()
+            try:
+                baseline = capture_baseline(state, args.baseline_file)
+            except OSError as exc:
+                return "500 Internal Server Error", text_type, f"opslaan mislukt: {exc.strerror or exc}".encode()
+            return "200 OK", "application/json", json.dumps(
+                {"count": len(baseline.addresses), "created": baseline.created, "file": args.baseline_file.name}).encode()
         if method != "GET":
             return "405 Method Not Allowed", text_type, b"method not allowed"
         if target == "/":
