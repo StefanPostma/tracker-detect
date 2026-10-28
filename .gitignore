@@ -1,0 +1,11 @@
+# Lokale omgeving
+.venv/
+__pycache__/
+.DS_Store
+
+# Gegenereerd met --update-vendors (data van Bluetooth SIG en Wireshark/IEEE)
+vendors.json
+
+# Scanresultaten: bevatten apparaten uit je eigen omgeving
+baseline.json
+*.csv

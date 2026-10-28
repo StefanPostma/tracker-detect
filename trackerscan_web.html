@@ -1,0 +1,494 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trackerscan</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7;
+    --surface: #fcfcfb;
+    --ink: #0b0b0b;
+    --ink-2: #52514e;
+    --muted: #898781;
+    --grid: #e1e0d9;
+    --border: rgba(11, 11, 11, 0.10);
+    --accent: #2a78d6;
+    --track: #cde2fb;
+    --good-text: #006300;
+    --critical: #d03b3b;
+    --warning: #fab219;
+    --hover: rgba(42, 120, 214, 0.06);
+    --selected: rgba(42, 120, 214, 0.12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --page: #0d0d0d;
+      --surface: #1a1a19;
+      --ink: #ffffff;
+      --ink-2: #c3c2b7;
+      --grid: #2c2c2a;
+      --border: rgba(255, 255, 255, 0.10);
+      --accent: #3987e5;
+      --track: #0d366b;
+      --good-text: #0ca30c;
+      --hover: rgba(57, 135, 229, 0.08);
+      --selected: rgba(57, 135, 229, 0.16);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --grid: #2c2c2a;
+    --border: rgba(255, 255, 255, 0.10);
+    --accent: #3987e5;
+    --track: #0d366b;
+    --good-text: #0ca30c;
+    --hover: rgba(57, 135, 229, 0.08);
+    --selected: rgba(57, 135, 229, 0.16);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--ink);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 1200px; margin: 0 auto; padding: 20px 16px 48px; }
+
+  header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; }
+  h1 { margin: 0; font-size: 20px; font-weight: 600; }
+  .status { margin: 0; color: var(--ink-2); font-size: 14px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+  .dot-live { background: var(--good-text); }
+  .dot-warn { background: var(--warning); }
+  .dot-off { background: var(--muted); }
+
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; margin: 14px 0; font-size: 14px; color: var(--ink-2); }
+  .controls label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+  .controls label:has(input:disabled) { opacity: 0.5; cursor: default; }
+  .hint { color: var(--muted); }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; }
+
+  #focus { padding: 16px 20px; margin-bottom: 14px; }
+  .focus-title { font-weight: 600; font-size: 16px; }
+  .focus-body { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 32px; margin: 14px 0 10px; }
+  .hero { font-size: 64px; font-weight: 600; line-height: 1; }
+  .hero .unit { font-size: 20px; font-weight: 500; color: var(--ink-2); }
+  .focus-trend { margin-top: 6px; font-size: 16px; font-weight: 600; }
+  .focus-viz { flex: 1 1 280px; display: flex; flex-direction: column; gap: 10px; }
+  .focus-viz .meter { flex: none; }
+  .focus-viz .spark { width: 100%; max-width: 480px; height: auto; }
+  button {
+    font: inherit; font-size: 14px; color: var(--ink); background: transparent;
+    border: 1px solid var(--border); border-radius: 6px; padding: 4px 12px; cursor: pointer;
+  }
+  button:hover:not(:disabled) { background: var(--hover); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  #focus { position: relative; }
+  .unfocus { position: absolute; top: 16px; right: 20px; }
+  .focus-head { padding-right: 110px; }
+
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th {
+    text-align: left; font-weight: 600; font-size: 13px; color: var(--ink-2);
+    padding: 10px 12px; border-bottom: 1px solid var(--grid); white-space: nowrap;
+  }
+  td { padding: 8px 12px; border-bottom: 1px solid var(--grid); vertical-align: middle; }
+  tbody tr:last-child td { border-bottom: 0; }
+  tr[data-address] { cursor: pointer; }
+  tr[data-address]:hover { background: var(--hover); }
+  tr[data-address]:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  tr.selected { background: var(--selected); }
+  tr.stale { opacity: 0.45; }
+  tr.is-hidden { opacity: 0.35; }
+  .col-hide { width: 1%; padding: 0 0 0 4px; }
+  .hide-hit { display: block; padding: 10px 8px; cursor: pointer; }
+  .hide-hit input { margin: 0; cursor: pointer; }
+  tr.flag-critical td:first-child { box-shadow: inset 3px 0 0 var(--critical); }
+  tr.flag-warning td:first-child { box-shadow: inset 3px 0 0 var(--warning); }
+  .offline tbody, .offline #focus { opacity: 0.5; }
+
+  .sig { display: flex; align-items: center; gap: 10px; min-width: 170px; }
+  .rssi { width: 2.6em; text-align: right; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .meter { flex: 1; min-width: 90px; height: 8px; background: var(--track); border-radius: 4px; overflow: hidden; }
+  .meter .fill { height: 100%; background: var(--accent); border-radius: 4px; }
+  .meter.big { height: 16px; border-radius: 8px; }
+  .meter.big .fill { border-radius: 8px; }
+
+  .trendcell { display: flex; align-items: center; gap: 6px; }
+  .spark { display: block; }
+  .spark polyline { fill: none; stroke: var(--muted); stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+  .spark circle { fill: var(--accent); stroke: var(--surface); stroke-width: 2; }
+  .trend-up { color: var(--good-text); }
+  .trend-down { color: var(--ink-2); }
+  .trendcell span { width: 1em; font-size: 13px; }
+
+  .kind {
+    display: inline-block; font-size: 12px; color: var(--ink-2); border: 1px solid var(--border);
+    border-radius: 4px; padding: 0 5px; margin-right: 6px; vertical-align: 1px;
+  }
+  .badge {
+    display: inline-block; font-size: 12px; font-weight: 600; padding: 0 7px;
+    border-radius: 999px; margin-left: 6px; vertical-align: 1px; white-space: nowrap;
+  }
+  .badge.new { background: var(--critical); color: #ffffff; }
+  .badge.sep { border: 1px solid var(--critical); color: var(--ink); }
+  .detail { color: var(--ink-2); font-size: 13px; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; color: var(--ink-2); }
+  .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  #empty { padding: 24px; margin: 0; color: var(--ink-2); text-align: center; }
+
+  @media (max-width: 720px) {
+    .col-name, .col-id { display: none; }
+    .hero { font-size: 48px; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Trackerscan</h1>
+    <p id="status" class="status"><span class="dot dot-off"></span>Verbinden…</p>
+  </header>
+
+  <div class="controls">
+    <label><input type="checkbox" id="f-trackers"> Alleen trackers en beacons</label>
+    <label><input type="checkbox" id="f-new" disabled> Alleen nieuw (t.o.v. baseline)</label>
+  </div>
+  <div class="controls">
+    <button type="button" id="hide-all">Verberg alles wat nu zichtbaar is</button>
+    <label><input type="checkbox" id="f-show-hidden"> Toon verborgen (<span id="hidden-count">0</span>)</label>
+    <button type="button" id="unhide-all" disabled>Alles weer tonen</button>
+    <span class="hint">Klik op een apparaat om het groot te volgen; vink het aan om het tijdelijk te verbergen.</span>
+  </div>
+
+  <section id="focus" class="card" hidden>
+    <button type="button" id="unfocus" class="unfocus">Loslaten</button>
+    <div id="focus-content" aria-live="polite"></div>
+  </section>
+
+  <div class="card table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th class="col-hide"><span class="hint" title="Tijdelijk verbergen">Verb.</span></th>
+          <th>Signaal (dBm)</th>
+          <th>Laatste 10</th>
+          <th>Type</th>
+          <th class="col-name">Naam</th>
+          <th class="col-id">ID</th>
+          <th class="num">Laatst</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <p id="empty" hidden></p>
+  </div>
+</main>
+
+<script>
+(() => {
+  "use strict";
+
+  const POLL_MS = 1000;
+  const RSSI_FLOOR = -100, RSSI_CEIL = -35;  // lege resp. volle balk, gelijk aan de terminal
+  const SEPARATED = "LOS VAN EIGENAAR";
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  const KIND_LABEL = { tracker: "Tracker", beacon: "Beacon", info: "Bekend", onbekend: "Onbekend" };
+
+  const $ = (id) => document.getElementById(id);
+  const rowsEl = $("rows"), statusEl = $("status"), focusEl = $("focus"), emptyEl = $("empty");
+  const fTrackers = $("f-trackers"), fNew = $("f-new"), fShowHidden = $("f-show-hidden");
+  const hideAllButton = $("hide-all"), unhideAllButton = $("unhide-all"), hiddenCountEl = $("hidden-count");
+  const focusContent = $("focus-content");
+  const rowByAddress = new Map();
+  let focused = null;
+  let lastState = null;
+  let holdOrder = false;  // muis boven de tabel: volgorde vasthouden, zodat je niet mis klikt
+  let defaultsApplied = false;
+
+  function load(key) { try { return localStorage.getItem(key); } catch { return null; } }
+  function store(key, value) { try { localStorage.setItem(key, value); } catch { /* geen opslag: prima */ } }
+
+  // Tijdelijk verborgen apparaten: alleen voor deze browsertab (sessionStorage),
+  // dus na een herstart van de scanner (nieuwe tab) is alles weer zichtbaar.
+  const hidden = new Set((() => {
+    try { return JSON.parse(sessionStorage.getItem("hidden") || "[]"); } catch { return []; }
+  })());
+  function setHidden(addresses, on) {
+    for (const address of addresses) on ? hidden.add(address) : hidden.delete(address);
+    try { sessionStorage.setItem("hidden", JSON.stringify([...hidden])); } catch { /* geen opslag: prima */ }
+    if (lastState) render(lastState);
+  }
+
+  // Bouwt elementen met tekstknopen: apparaatnamen komen van vreemde
+  // Bluetooth-apparaten en mogen nooit als HTML geïnterpreteerd worden.
+  function el(tag, attrs, ...children) {
+    const node = document.createElement(tag);
+    for (const [key, value] of Object.entries(attrs || {})) {
+      if (value != null && value !== false) node.setAttribute(key, value === true ? "" : String(value));
+    }
+    for (const child of children) {
+      if (child != null && child !== false) node.append(child instanceof Node ? child : String(child));
+    }
+    return node;
+  }
+  function svg(tag, attrs) {
+    const node = document.createElementNS(SVG_NS, tag);
+    for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, String(value));
+    return node;
+  }
+
+  const fmtRssi = (v) => (v == null ? "–" : String(Math.round(v)));
+  const ago = (sec) => (sec < 60 ? `${Math.round(sec)} s` : `${Math.floor(sec / 60)} min`);
+  const isFlagged = (d) => d.kind === "tracker" || d.kind === "beacon";
+  const cleanDetail = (d) => (d.detail || "").replace(SEPARATED, "").replace(/^[,\s]+/, "");
+
+  function meter(rssi, big) {
+    const frac = rssi == null ? 0 : Math.min(1, Math.max(0, (rssi - RSSI_FLOOR) / (RSSI_CEIL - RSSI_FLOOR)));
+    const fill = el("div", { class: "fill" });
+    fill.style.width = `${(frac * 100).toFixed(1)}%`;
+    return el("div", {
+      class: big ? "meter big" : "meter", role: "meter", "aria-label": "signaalsterkte",
+      "aria-valuemin": RSSI_FLOOR, "aria-valuemax": RSSI_CEIL, "aria-valuenow": rssi ?? RSSI_FLOOR,
+    }, fill);
+  }
+
+  function sparkline(samples, w, h) {
+    const root = svg("svg", { class: "spark", width: w, height: h, viewBox: `0 0 ${w} ${h}` });
+    const title = svg("title", {});
+    title.textContent = samples.length ? `Laatste ${samples.length} metingen (dBm): ${samples.join(", ")}` : "Nog geen metingen";
+    root.append(title);
+    if (samples.length === 1) root.append(svg("circle", { cx: w - 5, cy: h / 2, r: 4 }));
+    if (samples.length < 2) return root;
+    // Minstens 12 dB verticale ruimte, zodat gewone ruis niet als grote sprong oogt.
+    const lo0 = Math.min(...samples), hi0 = Math.max(...samples);
+    const mid = (lo0 + hi0) / 2, span = Math.max(12, hi0 - lo0), pad = 5;
+    const x = (i) => pad + (i * (w - 2 * pad)) / (samples.length - 1);
+    const y = (v) => h - pad - ((v - (mid - span / 2)) / span) * (h - 2 * pad);
+    const last = samples.length - 1;
+    root.append(
+      svg("polyline", { points: samples.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ") }),
+      svg("circle", { cx: x(last).toFixed(1), cy: y(samples[last]).toFixed(1), r: 4 }),
+    );
+    return root;
+  }
+
+  function trend(t, long) {
+    if (t > 0) return el("span", { class: "trend-up", title: "warmer" }, long ? "▲ warmer" : "▲");
+    if (t < 0) return el("span", { class: "trend-down", title: "kouder" }, long ? "▼ kouder" : "▼");
+    return el("span", { class: "trend-flat" }, long ? "— gelijk" : "");
+  }
+
+  function badges(d) {
+    return [
+      d.is_new ? el("span", { class: "badge new" }, "● NIEUW") : null,
+      d.separated ? el("span", { class: "badge sep" }, "⚠ los van eigenaar") : null,
+    ];
+  }
+
+  function rowClass(d) {
+    const classes = [];
+    if (d.stale) classes.push("stale");
+    if (d.kind === "tracker") classes.push(d.is_new === false ? "flag-warning" : "flag-critical");
+    if (d.address === focused) classes.push("selected");
+    if (hidden.has(d.address)) classes.push("is-hidden");
+    return classes.join(" ");
+  }
+
+  // Rij en vinkje blijven bestaan; alleen de celinhoud wordt elke seconde
+  // vernieuwd, zodat een klik nooit op een net vervangen element valt.
+  function createRow(address) {
+    const box = el("input", { type: "checkbox", "data-hide": address, "aria-label": "Tijdelijk verbergen" });
+    return el("tr", { "data-address": address, tabindex: 0 },
+      el("td", { class: "col-hide" }, el("label", { class: "hide-hit", title: "Tijdelijk verbergen" }, box)),
+      el("td"), el("td"), el("td"),
+      el("td", { class: "col-name" }), el("td", { class: "col-id mono" }), el("td", { class: "num" }));
+  }
+
+  function fillRow(tr, d) {
+    tr.className = rowClass(d);
+    const [hideCell, sigCell, trendCell, typeCell, nameCell, idCell, ageCell] = tr.cells;
+    hideCell.querySelector("input").checked = hidden.has(d.address);
+    sigCell.replaceChildren(el("div", { class: "sig" }, el("span", { class: "rssi" }, fmtRssi(d.rssi)), meter(d.rssi)));
+    trendCell.replaceChildren(el("div", { class: "trendcell" }, sparkline(d.samples, 88, 26), trend(d.trend, false)));
+    // Onbekende apparaten: leverancier (uit company-ID, service-UUID of MAC-prefix) als detailregel.
+    const detail = cleanDetail(d) || (d.kind === "onbekend" ? d.vendor : "");
+    typeCell.replaceChildren(
+      el("div", {}, el("span", { class: "kind" }, KIND_LABEL[d.kind] || d.kind), d.label, ...badges(d)),
+      detail ? el("div", { class: "detail" }, detail) : "");
+    nameCell.textContent = d.name || "";
+    idCell.textContent = d.id;
+    idCell.title = d.mac ? `${d.address} · MAC ${d.mac}` : d.address;
+    ageCell.textContent = ago(d.age);
+  }
+
+  function renderFocus(d) {
+    focusEl.hidden = !d;
+    if (!d) return;
+    const detail = cleanDetail(d);
+    focusContent.replaceChildren(
+      el("div", { class: "focus-head" },
+        el("div", { class: "focus-title" },
+          el("span", { class: "kind" }, KIND_LABEL[d.kind] || d.kind),
+          d.name ? `${d.name} — ${d.label}` : d.label, ...badges(d)),
+        el("div", { class: "detail" },
+          [detail, d.vendor, d.mac && `MAC ${d.mac}`, `ID ${d.address}`].filter(Boolean).join(" · "))),
+      el("div", { class: "focus-body" },
+        el("div", {},
+          el("div", { class: "hero" }, fmtRssi(d.rssi), el("span", { class: "unit" }, " dBm")),
+          el("div", { class: "focus-trend" }, trend(d.trend, true))),
+        el("div", { class: "focus-viz" }, meter(d.rssi, true), sparkline(d.samples, 480, 64))),
+      el("div", { class: "detail" },
+        `laatst gezien ${ago(d.age)} geleden · ${d.count}× ontvangen · ` +
+        `min/gem/max ${fmtRssi(d.rssi_min)} / ${fmtRssi(d.rssi_avg)} / ${fmtRssi(d.rssi_max)} dBm`),
+    );
+  }
+
+  function renderStatus(s) {
+    const parts = [`${s.devices.length} apparaten`, `${s.devices.filter(isFlagged).length} trackers/beacons`];
+    if (s.baseline) {
+      const created = new Date(s.baseline.created);
+      const when = isNaN(created) ? s.baseline.created : created.toLocaleString("nl-NL", { dateStyle: "short", timeStyle: "short" });
+      parts.push(`${s.devices.filter((d) => d.is_new).length} nieuw t.o.v. baseline van ${when}`);
+    }
+    if (s.ignored) parts.push(`${s.ignored} genegeerd`);
+    const hiddenNow = s.devices.filter((d) => hidden.has(d.address)).length;
+    if (hiddenNow) parts.push(`${hiddenNow} verborgen`);
+    parts.push(`bijgewerkt ${new Date(s.now * 1000).toLocaleTimeString("nl-NL")}`);
+    const baseline = s.phase === "baseline";
+    statusEl.replaceChildren(
+      el("span", { class: baseline ? "dot dot-warn" : "dot dot-live" }),
+      `${baseline ? "Baseline-scan — blijf ver van de auto" : "Live"} · ${parts.join(" · ")}`,
+    );
+  }
+
+  function render(s) {
+    lastState = s;
+    if (!defaultsApplied) {
+      fTrackers.checked = s.defaults.only_trackers || load("f-trackers") === "1";
+      fNew.checked = s.defaults.only_new || load("f-new") === "1";
+      defaultsApplied = true;
+    }
+    fNew.disabled = !s.baseline;
+
+    const filtered = filteredDevices(s);
+    // Een net verborgen rij blijft (vervaagd) staan zolang je de muis over de tabel
+    // beweegt; anders schuift de volgende rij onder je cursor en vink je die per ongeluk aan.
+    const list = fShowHidden.checked ? filtered : filtered.filter(
+      (d) => !hidden.has(d.address) || (holdOrder && rowByAddress.get(d.address)?.isConnected));
+    const hiddenNow = s.devices.filter((d) => hidden.has(d.address)).length;
+    hiddenCountEl.textContent = String(hiddenNow);
+    unhideAllButton.disabled = hidden.size === 0;
+
+    const shown = new Set();
+    for (const d of list) {
+      let tr = rowByAddress.get(d.address);
+      if (!tr) {
+        tr = createRow(d.address);
+        rowByAddress.set(d.address, tr);
+      }
+      fillRow(tr, d);
+      if (!holdOrder || !tr.isConnected) rowsEl.append(tr);  // verplaatst rijen naar de juiste volgorde
+      shown.add(d.address);
+    }
+    for (const [address, tr] of rowByAddress) {
+      if (!shown.has(address)) { tr.remove(); rowByAddress.delete(address); }
+    }
+    emptyEl.hidden = list.length > 0;
+    emptyEl.textContent = !s.devices.length ? "Nog geen apparaten ontvangen…"
+      : filtered.length ? "Alles is verborgen. Nieuwe signalen verschijnen hier vanzelf."
+      : "Geen apparaten binnen dit filter.";
+
+    renderFocus(s.devices.find((d) => d.address === focused));
+    renderStatus(s);
+  }
+
+  function filteredDevices(s) {
+    let list = s.devices;  // al gesorteerd door de scanner
+    if (fTrackers.checked) list = list.filter(isFlagged);
+    if (fNew.checked && s.baseline) list = list.filter((d) => d.is_new);
+    return list;
+  }
+
+  function renderOffline() {
+    statusEl.replaceChildren(
+      el("span", { class: "dot dot-off" }),
+      "Scanner niet bereikbaar — wacht hij op Enter in de terminal, of is trackerscan.py gestopt? Nieuwe poging elke seconde.",
+    );
+  }
+
+  async function poll() {
+    try {
+      const res = await fetch("/api/state", { cache: "no-store", signal: AbortSignal.timeout(3000) });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      render(await res.json());
+      document.body.classList.remove("offline");
+    } catch {
+      renderOffline();
+      document.body.classList.add("offline");
+    } finally {
+      setTimeout(poll, POLL_MS);
+    }
+  }
+
+  function toggleFocus(address) {
+    focused = focused === address ? null : address;
+    if (lastState) render(lastState);
+    if (focused) focusEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+
+  // Volgorde alleen vasthouden terwijl de muis beweegt (en 3 s daarna): een
+  // cursor die stil op de tabel rust mag het sorteren niet blijvend stoppen.
+  let holdTimer = null;
+  function releaseOrder() {
+    clearTimeout(holdTimer);
+    holdOrder = false;
+    if (lastState) render(lastState);
+  }
+  rowsEl.addEventListener("pointermove", () => {
+    holdOrder = true;
+    clearTimeout(holdTimer);
+    holdTimer = setTimeout(releaseOrder, 3000);
+  });
+  rowsEl.addEventListener("pointerleave", releaseOrder);
+  rowsEl.addEventListener("click", (e) => {
+    if (e.target.closest(".hide-hit")) return;  // vinkje: verbergen, niet volgen
+    const tr = e.target.closest("tr[data-address]");
+    if (tr) toggleFocus(tr.dataset.address);
+  });
+  rowsEl.addEventListener("change", (e) => {
+    const box = e.target.closest("input[data-hide]");
+    if (box) setHidden([box.dataset.hide], box.checked);
+  });
+  rowsEl.addEventListener("keydown", (e) => {
+    const tr = e.target.closest("tr[data-address]");
+    if (tr && e.target === tr && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); toggleFocus(tr.dataset.address); }
+  });
+  $("unfocus").addEventListener("click", () => toggleFocus(focused));
+  hideAllButton.addEventListener("click", () => {
+    if (lastState) setHidden(filteredDevices(lastState).map((d) => d.address), true);
+  });
+  unhideAllButton.addEventListener("click", () => {
+    fShowHidden.checked = false;
+    setHidden([...hidden], false);
+  });
+  fShowHidden.addEventListener("change", () => { if (lastState) render(lastState); });
+  for (const [box, key] of [[fTrackers, "f-trackers"], [fNew, "f-new"]]) {
+    box.addEventListener("change", () => { store(key, box.checked ? "1" : "0"); if (lastState) render(lastState); });
+  }
+
+  poll();
+})();
+</script>
+</body>
+</html>
