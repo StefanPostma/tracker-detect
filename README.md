@@ -1,5 +1,7 @@
 # trackerscan
 
+<a href="https://buymeacoffee.com/stefanpostma"><img src="https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=&slug=stefanpostma&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff" alt="Buy me a coffee" height="36"></a>
+
 Commandline-scanner voor macOS die continu naar Bluetooth Low Energy-apparaten
 zoekt en bekende trackers herkent: AirTag en andere Find My-tags, Samsung
 SmartTag, Tile, Chipolo, Google Find Hub-tags en generieke beacons
